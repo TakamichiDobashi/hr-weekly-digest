@@ -1,0 +1,20 @@
+{
+  "domestic_keywords": [
+    "人事 AI",
+    "採用 トレンド",
+    "人材育成",
+    "HR Tech",
+    "働き方改革"
+  ],
+  "international_keywords": [
+    "HR AI future of work",
+    "talent acquisition technology",
+    "employee experience AI",
+    "HR tech trends"
+  ],
+  "max_articles_per_feed": 5,
+  "digest_language": "ja",
+  "notion": {
+    "title_prefix": "【週次】人事AIニュースダイジェスト"
+  }
+}
