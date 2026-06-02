@@ -264,7 +264,9 @@ class DigestWriterAgent(BaseAgent):
             return json.loads(cleaned)
 
     def post_to_notion(self, notion: NotionClient, page_id: str,
-                       digest_data: dict, title: str) -> str:
+                       digest_data: dict, title: str,
+                       domestic_articles: list = None,
+                       international_articles: list = None) -> str:
         """構造化データをNotionの美しいレイアウトで投稿する"""
 
         def paragraph(text: str, url: str = None, bold: bool = False) -> dict:
@@ -326,6 +328,24 @@ class DigestWriterAgent(BaseAgent):
         # ── ④ 今週の総括 ──
         blocks.append(callout(digest_data.get("weekly_comment", ""), "💬", "gray_background"))
 
+        # ── ⑤ 参考リンク（元記事リストから確実に追加） ──
+        ref_sections = []
+        if domestic_articles:
+            ref_sections.append(("🇯🇵 国内ニュース", domestic_articles))
+        if international_articles:
+            ref_sections.append(("🌐 海外ニュース", international_articles))
+
+        if ref_sections:
+            blocks.append(divider())
+            blocks.append(heading("📎 参考リンク", 2))
+            for section_title, articles in ref_sections:
+                blocks.append(heading(section_title, 3))
+                for article in articles:
+                    url = article.get("url", "")
+                    art_title = article.get("title", "（タイトルなし）")
+                    if url:
+                        blocks.append(paragraph(f"・{art_title}", url=url))
+
         response = notion.pages.create(
             parent={"page_id": page_id},
             properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
@@ -382,7 +402,9 @@ class DigestManager:
             international_articles=international_articles
         )
         notion_url = writer_agent.post_to_notion(
-            self.notion, self.notion_page_id, digest_data, title
+            self.notion, self.notion_page_id, digest_data, title,
+            domestic_articles=domestic_articles,
+            international_articles=international_articles
         )
 
         print(f"\n=== 完了 ===")
