@@ -188,14 +188,23 @@ class InternationalNewsAgent(BaseAgent):
 class DigestWriterAgent(BaseAgent):
     """
     国内・海外の要約を統合し、最終ダイジェストを執筆してNotionに投稿するサブエージェント。
-    担当：読みやすいダイジェストの構成・執筆・投稿。
+    担当：構造化JSONでダイジェストを生成し、Notionに美しいレイアウトで投稿する。
     """
     SYSTEM = """あなたは人事・HR分野のニュースレター編集者です。
 提供された国内・海外のニュース要約をもとに、
-人事担当者が月曜の朝に読みたくなる週次ダイジェストを作成してください。"""
+人事担当者が月曜の朝に読みたくなる週次ダイジェストをJSON形式で作成してください。
+必ずJSONのみを返し、他のテキストは一切含めないでください。"""
 
     def write_digest(self, domestic_summary: str, international_summary: str,
-                     settings: dict, target_date: str) -> str:
+                     settings: dict, target_date: str,
+                     domestic_articles: list = None,
+                     international_articles: list = None) -> dict:
+        """構造化JSONでダイジェストを生成する"""
+
+        # 元記事URLの対照表を作成（タイトルの一部で照合用）
+        dom_urls = {a["title"][:30]: a["url"] for a in (domestic_articles or []) if a.get("url")}
+        int_urls = {a["title"][:30]: a["url"] for a in (international_articles or []) if a.get("url")}
+
         prompt = f"""以下の国内・海外ニュース要約をもとに、週次ダイジェストを作成してください。
 
 ## 国内ニュース要約
@@ -204,93 +213,111 @@ class DigestWriterAgent(BaseAgent):
 ## 海外ニュース要約
 {international_summary}
 
-## ダイジェストの構成
-1. 今週のハイライト（3点、箇条書き）
-2. 国内注目ニュース（各記事：見出し・概要・示唆・URL）
-3. 海外注目ニュース（各記事：見出し・概要・示唆・URL）
-4. 今週の総括コメント（2〜3文）
+## 国内ニュース 元記事URL参照（タイトルの冒頭30文字をキーにURLを照合してください）
+{json.dumps(dom_urls, ensure_ascii=False)}
 
-対象週: {target_date}
-読者: 日本企業の人事担当者・CHRO"""
+## 海外ニュース 元記事URL参照
+{json.dumps(int_urls, ensure_ascii=False)}
+
+以下のJSON形式のみで返してください（コードブロックや説明文は不要）：
+{{
+  "highlights": ["今週の重要ポイント1", "今週の重要ポイント2", "今週の重要ポイント3"],
+  "domestic_news": [
+    {{
+      "title": "記事タイトル",
+      "summary": "ニュース概要（2〜3文）",
+      "hr_insight": "人事担当者への示唆（1〜2文）",
+      "url": "元記事のURL（上記URL参照から該当するものを使う。なければ空文字）"
+    }}
+  ],
+  "international_news": [
+    {{
+      "title": "記事タイトル（日本語）",
+      "summary": "ニュース概要（日本語・2〜3文）",
+      "hr_insight": "日本の人事担当者への示唆（1〜2文）",
+      "url": "元記事のURL（上記URL参照から該当するものを使う。なければ空文字）"
+    }}
+  ],
+  "weekly_comment": "今週全体の総括コメント（3〜4文）"
+}}
+
+対象週: {target_date}"""
 
         print("  DigestWriterAgent: ダイジェストを執筆中...")
-        return self.run(prompt, self.SYSTEM)
+        response_text = self.run(prompt, self.SYSTEM)
+
+        # JSONを抽出してパース
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+        raise ValueError(f"JSON形式のレスポンスが取得できませんでした: {response_text[:300]}")
 
     def post_to_notion(self, notion: NotionClient, page_id: str,
-                       digest_text: str, title: str,
-                       domestic_articles: list = None,
-                       international_articles: list = None) -> str:
-        """Notionの指定ページに新しいサブページとしてダイジェストを投稿する"""
+                       digest_data: dict, title: str) -> str:
+        """構造化データをNotionの美しいレイアウトで投稿する"""
 
-        # 段落ブロックに分割（2000文字制限があるため）
-        def split_text(text: str, chunk_size: int = 1800) -> list[str]:
-            return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        def paragraph(text: str, url: str = None, bold: bool = False) -> dict:
+            rich = {"type": "text", "text": {"content": text}}
+            if url:
+                rich["text"]["link"] = {"url": url}
+            if bold:
+                rich["annotations"] = {"bold": True}
+            return {"object": "block", "type": "paragraph",
+                    "paragraph": {"rich_text": [rich]}}
+
+        def heading(text: str, level: int = 2) -> dict:
+            t = f"heading_{level}"
+            return {"object": "block", "type": t, t: {
+                "rich_text": [{"type": "text", "text": {"content": text}}]
+            }}
+
+        def callout(text: str, emoji: str, color: str) -> dict:
+            return {"object": "block", "type": "callout", "callout": {
+                "rich_text": [{"type": "text", "text": {"content": text}}],
+                "icon": {"emoji": emoji},
+                "color": color
+            }}
+
+        def divider() -> dict:
+            return {"object": "block", "type": "divider", "divider": {}}
 
         blocks = []
 
-        # ── メインのダイジェスト本文 ──
-        for chunk in split_text(digest_text):
-            blocks.append({
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": chunk}}]
-                }
-            })
+        # ── ① 今週のハイライト ──
+        highlights = "\n".join([f"• {h}" for h in digest_data.get("highlights", [])])
+        blocks.append(callout(f"今週のハイライト\n\n{highlights}", "📌", "yellow_background"))
+        blocks.append(divider())
 
-        # ── 参考リンクセクション ──
-        all_articles = []
-        if domestic_articles:
-            all_articles.append(("🇯🇵 国内ニュース", domestic_articles))
-        if international_articles:
-            all_articles.append(("🌐 海外ニュース", international_articles))
+        # ── ② 国内ニュース ──
+        blocks.append(heading("🇯🇵 国内注目ニュース", 2))
+        for article in digest_data.get("domestic_news", []):
+            url = article.get("url") or None
+            blocks.append(heading(article["title"], 3))
+            if url:
+                blocks.append(paragraph(f"🔗 元記事を読む", url=url))
+            blocks.append(paragraph(article.get("summary", "")))
+            blocks.append(callout(article.get("hr_insight", ""), "💡", "blue_background"))
 
-        if all_articles:
-            # 区切り線
-            blocks.append({"object": "block", "type": "divider", "divider": {}})
+        blocks.append(divider())
 
-            # 見出し
-            blocks.append({
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {
-                    "rich_text": [{"type": "text", "text": {"content": "📎 参考リンク"}}]
-                }
-            })
+        # ── ③ 海外ニュース ──
+        blocks.append(heading("🌐 海外注目ニュース", 2))
+        for article in digest_data.get("international_news", []):
+            url = article.get("url") or None
+            blocks.append(heading(article["title"], 3))
+            if url:
+                blocks.append(paragraph(f"🔗 元記事を読む", url=url))
+            blocks.append(paragraph(article.get("summary", "")))
+            blocks.append(callout(article.get("hr_insight", ""), "💡", "blue_background"))
 
-            for section_title, articles in all_articles:
-                # カテゴリ見出し
-                blocks.append({
-                    "object": "block",
-                    "type": "heading_3",
-                    "heading_3": {
-                        "rich_text": [{"type": "text", "text": {"content": section_title}}]
-                    }
-                })
-                # 各記事をクリッカブルリンクとして追加
-                for article in articles:
-                    url = article.get("url", "")
-                    title_text = article.get("title", "（タイトルなし）")
-                    if url:
-                        blocks.append({
-                            "object": "block",
-                            "type": "paragraph",
-                            "paragraph": {
-                                "rich_text": [{
-                                    "type": "text",
-                                    "text": {"content": f"・{title_text}", "link": {"url": url}},
-                                    "annotations": {"color": "blue"}
-                                }]
-                            }
-                        })
+        blocks.append(divider())
+
+        # ── ④ 今週の総括 ──
+        blocks.append(callout(digest_data.get("weekly_comment", ""), "💬", "gray_background"))
 
         response = notion.pages.create(
             parent={"page_id": page_id},
-            properties={
-                "title": {
-                    "title": [{"type": "text", "text": {"content": title}}]
-                }
-            },
+            properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
             children=blocks
         )
         return response["url"]
@@ -338,13 +365,13 @@ class DigestManager:
 
         print("\n[サブエージェント③] ダイジェスト執筆・Notion投稿")
         writer_agent = DigestWriterAgent(self.claude)
-        digest_text = writer_agent.write_digest(
-            domestic_summary, international_summary, self.settings, target_date
-        )
-        notion_url = writer_agent.post_to_notion(
-            self.notion, self.notion_page_id, digest_text, title,
+        digest_data = writer_agent.write_digest(
+            domestic_summary, international_summary, self.settings, target_date,
             domestic_articles=domestic_articles,
             international_articles=international_articles
+        )
+        notion_url = writer_agent.post_to_notion(
+            self.notion, self.notion_page_id, digest_data, title
         )
 
         print(f"\n=== 完了 ===")
