@@ -217,7 +217,9 @@ class DigestWriterAgent(BaseAgent):
         return self.run(prompt, self.SYSTEM)
 
     def post_to_notion(self, notion: NotionClient, page_id: str,
-                       digest_text: str, title: str) -> str:
+                       digest_text: str, title: str,
+                       domestic_articles: list = None,
+                       international_articles: list = None) -> str:
         """Notionの指定ページに新しいサブページとしてダイジェストを投稿する"""
 
         # 段落ブロックに分割（2000文字制限があるため）
@@ -225,6 +227,8 @@ class DigestWriterAgent(BaseAgent):
             return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
 
         blocks = []
+
+        # ── メインのダイジェスト本文 ──
         for chunk in split_text(digest_text):
             blocks.append({
                 "object": "block",
@@ -233,6 +237,52 @@ class DigestWriterAgent(BaseAgent):
                     "rich_text": [{"type": "text", "text": {"content": chunk}}]
                 }
             })
+
+        # ── 参考リンクセクション ──
+        all_articles = []
+        if domestic_articles:
+            all_articles.append(("🇯🇵 国内ニュース", domestic_articles))
+        if international_articles:
+            all_articles.append(("🌐 海外ニュース", international_articles))
+
+        if all_articles:
+            # 区切り線
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
+
+            # 見出し
+            blocks.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "📎 参考リンク"}}]
+                }
+            })
+
+            for section_title, articles in all_articles:
+                # カテゴリ見出し
+                blocks.append({
+                    "object": "block",
+                    "type": "heading_3",
+                    "heading_3": {
+                        "rich_text": [{"type": "text", "text": {"content": section_title}}]
+                    }
+                })
+                # 各記事をクリッカブルリンクとして追加
+                for article in articles:
+                    url = article.get("url", "")
+                    title_text = article.get("title", "（タイトルなし）")
+                    if url:
+                        blocks.append({
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [{
+                                    "type": "text",
+                                    "text": {"content": f"・{title_text}", "link": {"url": url}},
+                                    "annotations": {"color": "blue"}
+                                }]
+                            }
+                        })
 
         response = notion.pages.create(
             parent={"page_id": page_id},
@@ -292,7 +342,9 @@ class DigestManager:
             domestic_summary, international_summary, self.settings, target_date
         )
         notion_url = writer_agent.post_to_notion(
-            self.notion, self.notion_page_id, digest_text, title
+            self.notion, self.notion_page_id, digest_text, title,
+            domestic_articles=domestic_articles,
+            international_articles=international_articles
         )
 
         print(f"\n=== 完了 ===")
