@@ -5,9 +5,10 @@
 講座Session3で学んだ「Mgr型サブエージェント」パターンを実装。
 
   DigestManager（このスクリプト）
-      ├─ DomesticNewsAgent   : 国内人事ニュースを収集・要約
-      ├─ InternationalNewsAgent : 海外人事ニュースを収集・要約
-      └─ DigestWriterAgent   : 両結果を統合してNotionに投稿
+      ├─ DomesticNewsAgent      : 国内人事ニュースを収集・要約
+      ├─ InternationalNewsAgent : 海外人事ニュースを日本語で収集・要約
+      ├─ XPostAgent             : X（旧Twitter）の人事パーソン投稿を収集
+      └─ DigestWriterAgent      : 全結果を統合してNotionに投稿
 
 各"Agent"はClaude APIへの独立した呼び出しとして実装されており、
 それぞれが専門の役割を持つ「担当者」として機能する。
@@ -151,39 +152,125 @@ class DomesticNewsAgent(BaseAgent):
 
 class InternationalNewsAgent(BaseAgent):
     """
-    海外人事ニュースを収集・要約するサブエージェント。
-    担当：英語RSSから記事を集め、日本語で人事担当者向けに要約する。
+    海外人事ニュースを日本語で収集・要約するサブエージェント。
+    担当：日本語キーワードでGoogleNewsを検索し、海外事例を日本語で紹介する。
     """
     SYSTEM = """あなたは海外のHR・人材管理分野の専門アナリストです。
-英語で書かれた海外ニュースを日本語に翻訳・要約し、
-日本の人事担当者が参考にできる形で提供してください。"""
+収集した記事の中から海外の事例・動向に関するものを選び、
+すべて日本語で要約して日本の人事担当者向けに紹介してください。
+タイトル・本文・示唆はすべて日本語で記述してください。"""
 
     def summarize(self, articles: list[dict]) -> str:
         if not articles:
-            return "今週は該当する海外ニュースが見つかりませんでした。"
+            return "今週は該当する海外人事ニュースが見つかりませんでした。"
 
         articles_text = "\n\n".join([
             f"【{i+1}】{a['title']}\nURL: {a['url']}\n概要: {a['description']}"
             for i, a in enumerate(articles)
         ])
 
-        prompt = f"""以下の海外人事ニュース記事（{len(articles)}件）を日本語で要約してください。
+        prompt = f"""以下の記事（{len(articles)}件）の中から、海外の人事・HR事例を含むものを選び、
+すべて日本語で要約してください。海外事例が含まれない記事はスキップしてください。
 
 {articles_text}
 
-各記事について以下の形式でまとめてください：
-- タイトル（日本語訳）
+各記事について以下の形式でまとめてください（すべて日本語で）：
+- タイトル（日本語）
 - ニュース概要（日本語・2〜3文）
 - 日本の人事担当者への示唆（1〜2文）
-- 参考URL
+- 参考URL"""
 
-※翻訳・要約の過程で内容が正確でない場合があります。URLから原文をご確認ください。"""
-
-        print(f"  InternationalNewsAgent: {len(articles)}件の記事を要約中...")
+        print(f"  InternationalNewsAgent: {len(articles)}件の記事を日本語で要約中...")
         return self.run(prompt, self.SYSTEM)
 
 
-# ── サブエージェント③：ダイジェスト執筆・投稿担当 ────────
+# ── サブエージェント③：X投稿収集担当 ────────────────────
+
+class XPostAgent(BaseAgent):
+    """
+    X（旧Twitter）の人事パーソン投稿を収集するサブエージェント。
+    Anthropicのweb_searchツールを使い、有益な発信を探して日本語で紹介する。
+    """
+    SYSTEM = """あなたは人事・HR分野のSNS情報収集の専門家です。
+X（旧Twitter）で人事パーソンが発信している有益な投稿を探し、
+日本語でわかりやすく紹介してください。
+必ずJSON配列のみを返し、他のテキストは含めないでください。"""
+
+    def collect_posts(self) -> list[dict]:
+        """web_searchツールを使ってXの人事系投稿を収集する"""
+        prompt = """X（旧Twitter / x.com）で最近発信された人事・HR・採用分野の有益な投稿を検索してください。
+
+以下のようなトピックの投稿を探してください：
+・採用・選考の実践的な知見や工夫
+・組織開発・人材育成の事例や考察
+・HRtechやAI活用の実体験
+・CHROや人事リーダーの発信
+
+見つかった投稿を3〜5件、以下のJSON配列形式のみで返してください：
+[
+  {
+    "author": "発信者名またはアカウント名",
+    "content": "投稿内容の要約（日本語・2〜3文）",
+    "insight": "人事担当者への示唆（1文）",
+    "url": "投稿URL（あれば。なければ空文字）"
+  }
+]"""
+
+        tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+        messages = [{"role": "user", "content": prompt}]
+
+        print("  XPostAgent: X投稿をweb_searchで収集中...")
+
+        text = ""
+        for _ in range(6):  # 最大6ループ（tool_useが続く場合に備える）
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                system=self.SYSTEM,
+                tools=tools,
+                messages=messages
+            )
+
+            text_parts = [b.text for b in response.content if hasattr(b, "text")]
+
+            if response.stop_reason == "end_turn":
+                text = "".join(text_parts)
+                break
+
+            # tool_use が含まれる場合はメッセージに追加してループ継続
+            messages.append({"role": "assistant", "content": response.content})
+            has_tool_use = any(
+                getattr(b, "type", "") == "tool_use" for b in response.content
+            )
+            if not has_tool_use:
+                text = "".join(text_parts)
+                break
+
+        if not text:
+            print("  XPostAgent: レスポンスを取得できませんでした")
+            return []
+
+        # JSONパース
+        text = re.sub(r'```(?:json)?\s*', '', text).strip()
+        json_match = re.search(r'\[.*\]', text, re.DOTALL)
+        if json_match:
+            try:
+                posts = json.loads(json_match.group())
+                print(f"  XPostAgent: {len(posts)}件の投稿を収集しました")
+                return posts[:5]
+            except json.JSONDecodeError:
+                cleaned = re.sub(r',\s*([}\]])', r'\1', json_match.group())
+                try:
+                    posts = json.loads(cleaned)
+                    return posts[:5]
+                except json.JSONDecodeError:
+                    pass
+
+        print("  XPostAgent: 投稿の解析に失敗しました")
+        return []
+
+
+# ── サブエージェント④：ダイジェスト執筆・投稿担当 ────────
 
 class DigestWriterAgent(BaseAgent):
     """
@@ -266,7 +353,8 @@ class DigestWriterAgent(BaseAgent):
     def post_to_notion(self, notion: NotionClient, page_id: str,
                        digest_data: dict, title: str,
                        domestic_articles: list = None,
-                       international_articles: list = None) -> str:
+                       international_articles: list = None,
+                       x_posts: list = None) -> str:
         """構造化データをNotionの美しいレイアウトで投稿する"""
 
         def paragraph(text: str, url: str = None, bold: bool = False) -> dict:
@@ -328,7 +416,24 @@ class DigestWriterAgent(BaseAgent):
         # ── ④ 今週の総括 ──
         blocks.append(callout(digest_data.get("weekly_comment", ""), "💬", "gray_background"))
 
-        # ── ⑤ 参考リンク（元記事リストから確実に追加） ──
+        # ── ⑤ X 人事パーソンのつぶやき ──
+        if x_posts:
+            blocks.append(divider())
+            blocks.append(heading("𝕏 人事パーソンのつぶやき", 2))
+            for post in x_posts:
+                author = post.get("author", "")
+                content = post.get("content", "")
+                insight = post.get("insight", "")
+                url = post.get("url") or None
+
+                blocks.append(heading(f"@{author}" if author else "投稿", 3))
+                blocks.append(paragraph(content))
+                if insight:
+                    blocks.append(callout(insight, "💡", "purple_background"))
+                if url:
+                    blocks.append(paragraph("🔗 投稿を見る", url=url))
+
+        # ── ⑥ 参考リンク（元記事リストから確実に追加） ──
         ref_sections = []
         if domestic_articles:
             ref_sections.append(("🇯🇵 国内ニュース", domestic_articles))
@@ -387,16 +492,20 @@ class DigestManager:
         domestic_agent = DomesticNewsAgent(self.claude)
         domestic_summary = domestic_agent.summarize(domestic_articles)
 
-        print("\n[サブエージェント②] 海外ニュース収集・要約")
+        print("\n[サブエージェント②] 海外ニュース収集・要約（日本語）")
         international_articles = collect_articles(
-            self.settings["international_keywords"], max_articles, lang="en"
+            self.settings["international_keywords"], max_articles, lang="ja"
         )
         international_agent = InternationalNewsAgent(self.claude)
         international_summary = international_agent.summarize(international_articles)
 
+        print("\n[サブエージェント③] X投稿収集")
+        x_agent = XPostAgent(self.claude)
+        x_posts = x_agent.collect_posts()
+
         # ── Step 2: DigestWriterAgentが統合・執筆・投稿 ──────────
 
-        print("\n[サブエージェント③] ダイジェスト執筆・Notion投稿")
+        print("\n[サブエージェント④] ダイジェスト執筆・Notion投稿")
         writer_agent = DigestWriterAgent(self.claude)
         digest_data = writer_agent.write_digest(
             domestic_summary, international_summary, self.settings, target_date,
@@ -406,7 +515,8 @@ class DigestManager:
         notion_result = writer_agent.post_to_notion(
             self.notion, self.notion_page_id, digest_data, title,
             domestic_articles=domestic_articles,
-            international_articles=international_articles
+            international_articles=international_articles,
+            x_posts=x_posts
         )
 
         # ── Step 3: 親ページのバックナンバーにリンクを追加 ──
