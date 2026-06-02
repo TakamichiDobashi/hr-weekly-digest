@@ -331,8 +331,8 @@ class DigestWriterAgent(BaseAgent):
 対象週: {target_date}"""
 
         print("  DigestWriterAgent: ダイジェストを執筆中...")
-        # JSONが長くなるのでmax_tokensを4000に増やす
-        response_text = self.run(prompt, self.SYSTEM, max_tokens=4000)
+        # X投稿セクション追加でJSONが長くなるため8000に増やす
+        response_text = self.run(prompt, self.SYSTEM, max_tokens=8000)
 
         # マークダウンのコードブロックを除去
         response_text = re.sub(r'```(?:json)?\s*', '', response_text).strip()
