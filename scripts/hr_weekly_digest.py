@@ -104,9 +104,9 @@ class BaseAgent:
         self.client = client
         self.model = model
 
-    def run(self, prompt: str, system: str = "") -> str:
+    def run(self, prompt: str, system: str = "", max_tokens: int = 2000) -> str:
         messages = [{"role": "user", "content": prompt}]
-        kwargs = {"model": self.model, "max_tokens": 2000, "messages": messages}
+        kwargs = {"model": self.model, "max_tokens": max_tokens, "messages": messages}
         if system:
             kwargs["system"] = system
         response = self.client.messages.create(**kwargs)
@@ -244,13 +244,24 @@ class DigestWriterAgent(BaseAgent):
 対象週: {target_date}"""
 
         print("  DigestWriterAgent: ダイジェストを執筆中...")
-        response_text = self.run(prompt, self.SYSTEM)
+        # JSONが長くなるのでmax_tokensを4000に増やす
+        response_text = self.run(prompt, self.SYSTEM, max_tokens=4000)
+
+        # マークダウンのコードブロックを除去
+        response_text = re.sub(r'```(?:json)?\s*', '', response_text).strip()
 
         # JSONを抽出してパース
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-        raise ValueError(f"JSON形式のレスポンスが取得できませんでした: {response_text[:300]}")
+        if not json_match:
+            raise ValueError(f"JSON形式のレスポンスが取得できませんでした: {response_text[:300]}")
+
+        raw_json = json_match.group()
+        try:
+            return json.loads(raw_json)
+        except json.JSONDecodeError:
+            # 末尾カンマなど軽微な問題を修正して再試行
+            cleaned = re.sub(r',\s*([}\]])', r'\1', raw_json)
+            return json.loads(cleaned)
 
     def post_to_notion(self, notion: NotionClient, page_id: str,
                        digest_data: dict, title: str) -> str:
