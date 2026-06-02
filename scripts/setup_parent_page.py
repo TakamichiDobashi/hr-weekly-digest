@@ -93,7 +93,7 @@ def setup_parent_page():
 
         # ④ バックナンバーの案内
         heading("📚 バックナンバー", 2),
-        paragraph("↓ 以下に各週のダイジェストが自動追加されます"),
+        paragraph("最新のダイジェストが上に自動追加されます ↓"),
     ]
 
     notion.blocks.children.append(block_id=page_id, children=blocks)

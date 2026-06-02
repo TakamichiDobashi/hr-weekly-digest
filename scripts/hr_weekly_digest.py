@@ -351,7 +351,9 @@ class DigestWriterAgent(BaseAgent):
             properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
             children=blocks
         )
-        return response["url"]
+        # ページアイコンを設定
+        notion.pages.update(page_id=response["id"], icon={"type": "emoji", "emoji": "🗞️"})
+        return {"url": response["url"], "id": response["id"]}
 
 
 # ── Manager：全体を統括 ───────────────────────────────────
@@ -401,15 +403,73 @@ class DigestManager:
             domestic_articles=domestic_articles,
             international_articles=international_articles
         )
-        notion_url = writer_agent.post_to_notion(
+        notion_result = writer_agent.post_to_notion(
             self.notion, self.notion_page_id, digest_data, title,
             domestic_articles=domestic_articles,
             international_articles=international_articles
         )
 
+        # ── Step 3: 親ページのバックナンバーにリンクを追加 ──
+        print("\n[Manager] 親ページにリンクを追加中...")
+        date_label = today.strftime("%Y年%-m月%-d日（%a）").replace(
+            "Mon", "月").replace("Tue", "火").replace("Wed", "水").replace(
+            "Thu", "木").replace("Fri", "金").replace("Sat", "土").replace("Sun", "日")
+        self.update_parent_index(notion_result["id"], date_label)
+
         print(f"\n=== 完了 ===")
-        print(f"Notionに投稿しました: {notion_url}")
-        return notion_url
+        print(f"Notionに投稿しました: {notion_result['url']}")
+        return notion_result["url"]
+
+    def update_parent_index(self, digest_page_id: str, date_label: str):
+        """
+        親ページの「📚 バックナンバー」セクションに新しいダイジェストへのリンクを追加する。
+        「バックナンバー」見出しの直後に挿入するため、常に最新が上に表示される。
+        """
+        # 親ページの全ブロックを取得
+        result = self.notion.blocks.children.list(block_id=self.notion_page_id)
+        all_blocks = result.get("results", [])
+
+        # 「📚 バックナンバー」見出しブロックを探す
+        heading_block_id = None
+        for block in all_blocks:
+            if block.get("type") == "heading_2":
+                texts = block["heading_2"].get("rich_text", [])
+                content = "".join(t.get("text", {}).get("content", "") for t in texts)
+                if "バックナンバー" in content:
+                    heading_block_id = block["id"]
+                    break
+
+        # エントリーブロック（callout形式でカード風に）
+        entry = {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {"content": f"📅 {date_label}\n"},
+                        "annotations": {"bold": True}
+                    },
+                    {
+                        "type": "mention",
+                        "mention": {"type": "page", "page": {"id": digest_page_id}}
+                    }
+                ],
+                "icon": {"emoji": "🗞️"},
+                "color": "default"
+            }
+        }
+
+        # 見出しの直後に挿入（新しいものが上に来る）
+        kwargs = {"children": [entry]}
+        if heading_block_id:
+            kwargs["after"] = heading_block_id
+
+        self.notion.blocks.children.append(
+            block_id=self.notion_page_id,
+            **kwargs
+        )
+        print(f"  親ページにリンクを追加しました: {date_label}")
 
 
 # ── エントリーポイント ─────────────────────────────────────
