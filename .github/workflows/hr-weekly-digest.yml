@@ -26,6 +26,19 @@ jobs:
             anthropic \
             notion-client
 
+      - name: 利用可能なモデルを確認（デバッグ用）
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python3 -c "
+          import anthropic
+          client = anthropic.Anthropic()
+          models = client.models.list()
+          print('=== 利用可能なモデル ===')
+          for m in models.data:
+              print(m.id)
+          "
+
       - name: 週次ダイジェストを生成・投稿
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
