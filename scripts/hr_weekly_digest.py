@@ -100,7 +100,7 @@ class BaseAgent:
     各サブエージェントの基底クラス。
     Claude APIクライアントを共有し、役割に応じたプロンプトで実行する。
     """
-    def __init__(self, client: anthropic.Anthropic, model: str = "claude-3-5-sonnet-20241022"):
+    def __init__(self, client: anthropic.Anthropic, model: str = "claude-haiku-4-5-20251001"):
         self.client = client
         self.model = model
 
