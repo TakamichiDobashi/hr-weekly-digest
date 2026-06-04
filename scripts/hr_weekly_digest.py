@@ -24,6 +24,7 @@ from urllib.parse import quote
 from urllib.error import URLError
 
 import anthropic
+import requests
 from notion_client import Client as NotionClient
 
 # ── 定数 ──────────────────────────────────────────────────
@@ -526,9 +527,73 @@ class DigestManager:
             "Thu", "木").replace("Fri", "金").replace("Sat", "土").replace("Sun", "日")
         self.update_parent_index(notion_result["id"], date_label)
 
+        # ── Step 4: Slack通知 ──────────────────────────────
+        slack_webhook = os.environ.get("SLACK_WEBHOOK_URL")
+        if slack_webhook:
+            print("\n[Manager] Slackに通知中...")
+            self.notify_slack(slack_webhook, notion_result["url"], title, today)
+
         print(f"\n=== 完了 ===")
         print(f"Notionに投稿しました: {notion_result['url']}")
         return notion_result["url"]
+
+    def notify_slack(self, webhook_url: str, notion_url: str,
+                     title: str, today: datetime) -> None:
+        """Slack Incoming Webhook でダイジェスト更新を通知する"""
+        date_str = today.strftime("%Y年%-m月%-d日（%a）").replace(
+            "Mon", "月").replace("Tue", "火").replace("Wed", "水").replace(
+            "Thu", "木").replace("Fri", "金").replace("Sat", "土").replace("Sun", "日")
+
+        payload = {
+            "text": f"🗞️ 人事AIニュースダイジェストが更新されました！",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "🗞️ 人事AIニュースダイジェスト",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*{date_str}* の週次ダイジェストが更新されました！\n"
+                            f"国内ニュース・海外ニュース・X人事パーソン投稿をまとめています。"
+                        )
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"👉 *<{notion_url}|Notionで読む>*"
+                    }
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": "📌 毎週月曜 8:00 JST に自動配信 | KAGダイジェストBot"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        resp = requests.post(
+            webhook_url,
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload),
+            timeout=10
+        )
+        if resp.status_code == 200:
+            print("  Slack通知送信完了 ✅")
+        else:
+            print(f"  Slack通知エラー: {resp.status_code} {resp.text}")
 
     def update_parent_index(self, digest_page_id: str, date_label: str):
         """
